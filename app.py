@@ -39,7 +39,7 @@ except ImportError:
 # ============================================================================
 
 APP_TITLE = "🛡️ ShealdX"
-AI_MODEL = "gemini-2.5-flash"
+AI_MODEL = "gemini-3.6-flash"  # Updated to Gemini 3.6 Flash
 REQUEST_TIMEOUT = 8
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -179,32 +179,12 @@ def scrape_site_content(url: str) -> dict:
         raw_strings = [s for s in raw_strings if s]
         visible_text = " ".join(raw_strings)
 
-        seen = set()
-        content_points = []
-        nav_labels = []
-        for s in raw_strings:
-            key = s.lower()
-            if len(s) < 3 or key in seen:
-                continue
-            seen.add(key)
-            if len(s) >= 18 and len(s.split()) >= 4:
-                content_points.append(s[:180])
-                if len(content_points) >= 20:
-                    continue
-            else:
-                nav_labels.append(s[:40])
-                if len(nav_labels) >= 20:
-                    continue
-
         text_sample = visible_text[:3000]
 
         forms = soup.find_all("form")
         password_inputs = soup.find_all("input", attrs={"type": "password"})
         all_inputs = soup.find_all("input")
         iframes = soup.find_all("iframe")
-        external_scripts = [
-            s.get("src") for s in soup.find_all("script") if s.get("src")
-        ]
 
         return {
             "success": True,
@@ -213,25 +193,11 @@ def scrape_site_content(url: str) -> dict:
             "redirected": response.url != url,
             "title": title,
             "text_sample": text_sample,
-            "content_points": content_points,
-            "nav_labels": nav_labels,
-            "text_length": len(visible_text),
             "form_count": len(forms),
             "password_field_count": len(password_inputs),
             "total_input_count": len(all_inputs),
             "iframe_count": len(iframes),
-            "external_script_count": len(external_scripts),
         }
-    except requests.exceptions.SSLError as e:
-        return {"success": False, "error": f"SSL error during scrape: {e}"}
-    except requests.exceptions.Timeout:
-        return {"success": False, "error": "Request timed out — site may be blocking bots or is unreachable."}
-    except requests.exceptions.TooManyRedirects:
-        return {"success": False, "error": "Too many redirects."}
-    except requests.exceptions.ConnectionError as e:
-        return {"success": False, "error": f"Connection error: {e}"}
-    except requests.exceptions.RequestException as e:
-        return {"success": False, "error": f"Request failed: {e}"}
     except Exception as e:
         return {"success": False, "error": f"Unexpected scraping error: {e}"}
 
@@ -246,82 +212,38 @@ def compute_heuristic_score(features: dict, ssl_info: dict, content: dict) -> di
 
     if not features["is_https"]:
         score += 10
-        flags.append("Site does not use HTTPS.")
-
     if features["has_at_symbol"]:
         score += 15
-        flags.append("URL contains an '@' symbol (common cloaking trick).")
-
     if features["has_ip_address"]:
         score += 20
-        flags.append("Domain is a raw IP address instead of a hostname.")
-
     if features["dot_count"] > 3:
         score += 10
-        flags.append(f"Unusually high number of dots in domain ({features['dot_count']}).")
-
     if features["hyphen_count"] > 2:
         score += 10
-        flags.append(f"Excessive hyphens in domain ({features['hyphen_count']}).")
-
     if features["url_length"] > 75:
         score += 10
-        flags.append(f"URL is unusually long ({features['url_length']} characters).")
-
     if features["subdomain_count"] > 3:
         score += 10
-        flags.append(f"Excessive subdomain nesting ({features['subdomain_count']}).")
-
     if features["suspicious_keyword_hit"]:
         score += 10
-        flags.append(
-            "URL contains sensitive/urgency keywords: "
-            + ", ".join(features["suspicious_keyword_hit"][:5])
-        )
-
     if features["has_port"]:
         score += 5
-        flags.append("Non-standard port explicitly specified in URL.")
-
     if features.get("is_free_hosting_platform"):
         score += 10
-        flags.append("Hosted on a free/instant-deploy platform (commonly abused for throwaway phishing infrastructure).")
-
     if features.get("subdomain_looks_random"):
         score += 15
-        flags.append(
-            f"Subdomain looks auto-generated / random (entropy={features.get('subdomain_entropy')}), "
-            "a pattern typical of automated phishing kit deployments."
-        )
-
     if not ssl_info.get("valid"):
         score += 15
-        flags.append("SSL certificate could not be validated or handshake failed.")
     elif ssl_info.get("expired"):
         score += 10
-        flags.append("SSL certificate is expired.")
 
     if content.get("success"):
-        has_credential_form = content["form_count"] > 0 and content["password_field_count"] > 0
-
         if content["password_field_count"] > 0 and not features["is_https"]:
             score += 20
-            flags.append("Password field submitted over an insecure (non-HTTPS) connection.")
-
-        if has_credential_form:
+        if content["form_count"] > 0 and content["password_field_count"] > 0:
             score += 25
-            flags.append("Page contains a live login/credential-harvesting form with a password field.")
-
-        if not content.get("title"):
-            score += 5
-            flags.append("Page has no title tag — common on hastily deployed phishing pages.")
-
-        if content["iframe_count"] > 2:
-            score += 5
-            flags.append("Multiple embedded iframes detected (possible clickjacking/cloaking).")
     else:
         score += 5
-        flags.append("Live content could not be scraped — reduced visibility into page behavior.")
 
     score = min(score, 100)
 
@@ -359,7 +281,7 @@ def build_ai_prompt(features: dict, ssl_info: dict, content: dict, heuristic: di
         "domain": features["domain"],
         "heuristic_features": features,
         "ssl_certificate": ssl_info,
-        "scraped_page": {"success": content.get("success"), "title": content.get("title")},
+        "scraped_page": {"success": content.get("success"), "title": content.get("title"), "text_sample": text_sample},
         "preliminary_heuristic_score": heuristic["score"],
     }
     return "Analyze the following target for phishing risk. Data:\n\n" + json.dumps(payload, indent=2, default=str)
@@ -434,7 +356,6 @@ def risk_badge(risk_level: str):
 
 
 def load_html(filename: str) -> str:
-    """Load the static header.html file from the project folder."""
     path = Path(__file__).parent / filename
     try:
         return path.read_text(encoding="utf-8")
@@ -457,7 +378,6 @@ def main():
 
     api_key = get_api_key()
 
-    # Load and display header.html
     header_html = load_html("header.html")
     if header_html:
         st.markdown(header_html, unsafe_allow_html=True)
@@ -466,7 +386,7 @@ def main():
         st.caption("Welcome to ShealdX — your trusted shield against phishing threats.")
 
     if not api_key:
-        st.warning("No AI engine key found — running in heuristics-only mode. Add `SHEALDX_API_KEY` to Streamlit Cloud Secrets.")
+        st.warning("No AI engine key found — running in heuristics-only mode.")
     else:
         masked = api_key[:4] + "…" + api_key[-4:] if len(api_key) > 8 else "••••"
         st.caption(f"✅ AI engine key loaded ({masked})")
@@ -526,8 +446,6 @@ def main():
         st.write(f"**Domain:** `{features['domain']}`")
         st.write(f"**HTTPS:** {'✅ Yes' if features['is_https'] else '❌ No'}")
         st.write(f"**URL Length:** {features['url_length']} characters")
-        if features["suspicious_keyword_hit"]:
-            st.write(f"**Suspicious keywords:** {', '.join(features['suspicious_keyword_hit'])}")
 
         st.markdown("---")
         st.subheader("🔒 SSL Certificate")
@@ -545,16 +463,14 @@ def main():
             st.write(f"**Page Title:** {content.get('title') or 'N/A'}")
             st.write(f"**Forms detected:** {content['form_count']}")
             st.write(f"**Password fields:** {content['password_field_count']}")
+            
+            with st.expander("ℹ️ Click here for detailed URL & Page Information"):
+                st.markdown(f"**Target URL:** `{features['full_url']}`")
+                st.markdown(f"**Final Destination:** `{content.get('final_url', features['full_url'])}`")
+                st.markdown(f"**Page Purpose / Info Preview:**")
+                st.info(content.get('text_sample', 'No textual data available')[:500] + "...")
         else:
             st.warning(f"Could not scrape live content: {content.get('error')}")
-
-        st.markdown("---")
-        st.subheader("🚩 Heuristic Red Flags")
-        if heuristic["flags"]:
-            for flag in heuristic["flags"]:
-                st.write(f"- {flag}")
-        else:
-            st.write("No heuristic red flags triggered.")
 
     st.divider()
     st.subheader("🤖 ShealdX AI Threat Intelligence")
