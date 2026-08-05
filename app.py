@@ -40,10 +40,10 @@ except ImportError:
 
 APP_TITLE = "🛡️ ShealdX"
 AI_MODEL = "gemini-3.6-flash"
-REQUEST_TIMEOUT = 8
+REQUEST_TIMEOUT = 12
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 PhishGuardBot/1.0"
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
 SUSPICIOUS_KEYWORDS = [
@@ -203,47 +203,63 @@ def scrape_site_content(url: str) -> dict:
 
 
 # ============================================================================
-# HEURISTIC SCORING ENGINE
+# HEURISTIC SCORING ENGINE & BROKEN RULES TRACKER
 # ============================================================================
 
 def compute_heuristic_score(features: dict, ssl_info: dict, content: dict) -> dict:
     score = 0
-    flags = []
+    broken_rules = []
 
     if not features["is_https"]:
         score += 10
+        broken_rules.append("Missing HTTPS (Insecure HTTP protocol used)")
     if features["has_at_symbol"]:
         score += 15
+        broken_rules.append("URL contains suspicious '@' symbol")
     if features["has_ip_address"]:
         score += 20
+        broken_rules.append("Domain uses raw IP address instead of domain name")
     if features["dot_count"] > 3:
         score += 10
+        broken_rules.append(f"Excessive dots in domain ({features['dot_count']} dots)")
     if features["hyphen_count"] > 2:
         score += 10
+        broken_rules.append(f"Excessive hyphens in domain ({features['hyphen_count']} hyphens)")
     if features["url_length"] > 75:
         score += 10
+        broken_rules.append(f"Abnormally long URL length ({features['url_length']} characters)")
     if features["subdomain_count"] > 3:
         score += 10
+        broken_rules.append("Too many subdomains detected")
     if features["suspicious_keyword_hit"]:
         score += 10
+        broken_rules.append(f"Contains suspicious keywords: {', '.join(features['suspicious_keyword_hit'])}")
     if features["has_port"]:
         score += 5
+        broken_rules.append("URL contains a non-standard network port")
     if features.get("is_free_hosting_platform"):
         score += 10
+        broken_rules.append("Hosted on a free/shared hosting platform")
     if features.get("subdomain_looks_random"):
         score += 15
+        broken_rules.append("High entropy/random-looking characters in subdomain")
     if not ssl_info.get("valid"):
         score += 15
+        broken_rules.append("Invalid or unverified SSL certificate")
     elif ssl_info.get("expired"):
         score += 10
+        broken_rules.append("SSL certificate has expired")
 
     if content.get("success"):
         if content["password_field_count"] > 0 and not features["is_https"]:
             score += 20
+            broken_rules.append("Password input field found on an unencrypted HTTP connection")
         if content["form_count"] > 0 and content["password_field_count"] > 0:
             score += 25
+            broken_rules.append("Contains sensitive login/credential collection forms")
     else:
         score += 5
+        broken_rules.append("Could not fully scan live web page content")
 
     score = min(score, 100)
 
@@ -254,7 +270,7 @@ def compute_heuristic_score(features: dict, ssl_info: dict, content: dict) -> di
     else:
         risk_level = "Low"
 
-    return {"score": score, "risk_level": risk_level, "flags": flags}
+    return {"score": score, "risk_level": risk_level, "broken_rules": broken_rules}
 
 
 # ============================================================================
@@ -322,23 +338,12 @@ def combine_verdict(heuristic: dict, ai_result: dict | None) -> dict:
             "basis": "Deterministic Security Audit — URL structure, SSL/TLS validation, and live content inspection.",
         }
     
-    risk_to_num = {"Low": 20, "Medium": 55, "High": 85}
-    ai_numeric = risk_to_num.get(ai_result["risk_level"], 50)
-    ai_confidence = ai_result.get("confidence", 50)
-    ai_weight = 0.3 + 0.4 * (ai_confidence / 100)
-    combined_score = (heuristic["score"] * (1 - ai_weight)) + (ai_numeric * ai_weight)
-    
-    thresholds = [(60, "High"), (30, "Medium"), (0, "Low")]
-    final_risk = "Low"
-    for th, lbl in thresholds:
-        if combined_score >= th:
-            final_risk = lbl
-            break
+    ai_confidence = ai_result.get("confidence", 95)
 
     return {
-        "final_risk_level": final_risk,
-        "final_confidence": round(combined_score, 1),
-        "basis": "Multi-Layered Threat Assessment — combines heuristics and contextual AI reasoning.",
+        "final_risk_level": ai_result.get("risk_level", heuristic["risk_level"]),
+        "final_confidence": ai_confidence,
+        "basis": "Multi-Layered Threat Assessment — powered by contextual AI intelligence and security heuristics.",
     }
 
 
@@ -353,14 +358,6 @@ def risk_badge(risk_level: str):
         st.warning("🟠 **MEDIUM RISK** — Proceed with caution; some suspicious indicators found.")
     else:
         st.success("🟢 **LOW RISK** — No strong phishing indicators detected.")
-
-
-def load_html(filename: str) -> str:
-    path = Path(__file__).parent / filename
-    try:
-        return path.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return ""
 
 
 def get_api_key() -> str:
@@ -378,12 +375,8 @@ def main():
 
     api_key = get_api_key()
 
-    header_html = load_html("header.html")
-    if header_html:
-        st.markdown(header_html, unsafe_allow_html=True)
-    else:
-        st.title(APP_TITLE)
-        st.caption("Welcome to ShealdX — your trusted shield against phishing threats.")
+    st.title(APP_TITLE)
+    st.caption("Welcome to ShealdX — your trusted shield against phishing threats.")
 
     url_input = st.text_input("🔗 Enter a target URL to analyze", placeholder="e.g. https://example.com/login")
     analyze_clicked = st.button("🔍 Analyze URL", type="primary")
@@ -441,6 +434,11 @@ def main():
         st.write(f"**HTTPS:** {'✅ Yes' if features['is_https'] else '❌ No'}")
         st.write(f"**URL Length:** {features['url_length']} characters")
 
+        if heuristic["score"] > 0 and heuristic["broken_rules"]:
+            st.markdown("#### ⚠️ Broken Heuristic Rules / Violated Points:")
+            for rule in heuristic["broken_rules"]:
+                st.markdown(f"- ❌ {rule}")
+
         st.markdown("---")
         st.subheader("🔒 SSL Certificate")
         if ssl_info.get("valid"):
@@ -453,9 +451,8 @@ def main():
     with right:
         st.subheader("🌐 Live Content Scan")
         if content.get("success"):
-            st.success(f"Page fetched successfully (HTTP {content['status_code']}).")
+            st.success("Page fetched successfully.")
             
-            # Clean and structured expander for page info
             with st.expander("ℹ️ Click here for detailed URL & Page Information"):
                 st.markdown(f"**Target URL:** `{features['full_url']}`")
                 st.markdown(f"**Final Destination:** `{content.get('final_url', features['full_url'])}`")
@@ -472,16 +469,13 @@ def main():
         risk_badge(ai_result["risk_level"])
         st.write(f"**Summary:** {ai_result.get('summary', 'N/A')}")
         st.write(f"**Suspected impersonated brand:** {ai_result.get('impersonated_brand', 'None detected')}")
-        if ai_result.get("red_flags"):
-            st.write("**AI-identified red flags:**")
-            for flag in ai_result["red_flags"]:
-                st.write(f"- {flag}")
-        st.info(f"💡 **Recommendation:** {ai_result.get('recommendation', 'N/A')}")
+        
+        # JSON Format label and arrow right below impersonated brand
+        st.markdown("### JSON Format")
+        with st.expander("📋 View Structured Response Data"):
+            st.code(json.dumps(ai_result, indent=4), language="json")
 
-        # Dedicated JSON Format Section right below summary/AI results
-        st.markdown("---")
-        st.markdown("### 📋 AI Structured Response (JSON Format)")
-        st.code(json.dumps(ai_result, indent=4), language="json")
+        st.info(f"💡 **Recommendation:** {ai_result.get('recommendation', 'N/A')}")
     else:
         st.warning(f"AI analysis unavailable: {ai_error}")
 
