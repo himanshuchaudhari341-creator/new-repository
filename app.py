@@ -39,7 +39,7 @@ except ImportError:
 # ============================================================================
 
 APP_TITLE = "🛡️ ShealdX"
-AI_MODEL = "gemini-3.6-flash"  # Updated to Gemini 3.6 Flash
+AI_MODEL = "gemini-3.6-flash"
 REQUEST_TIMEOUT = 8
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -385,12 +385,6 @@ def main():
         st.title(APP_TITLE)
         st.caption("Welcome to ShealdX — your trusted shield against phishing threats.")
 
-    if not api_key:
-        st.warning("No AI engine key found — running in heuristics-only mode.")
-    else:
-        masked = api_key[:4] + "…" + api_key[-4:] if len(api_key) > 8 else "••••"
-        st.caption(f"✅ AI engine key loaded ({masked})")
-
     url_input = st.text_input("🔗 Enter a target URL to analyze", placeholder="e.g. https://example.com/login")
     analyze_clicked = st.button("🔍 Analyze URL", type="primary")
 
@@ -460,15 +454,15 @@ def main():
         st.subheader("🌐 Live Content Scan")
         if content.get("success"):
             st.success(f"Page fetched successfully (HTTP {content['status_code']}).")
-            st.write(f"**Page Title:** {content.get('title') or 'N/A'}")
-            st.write(f"**Forms detected:** {content['form_count']}")
-            st.write(f"**Password fields:** {content['password_field_count']}")
             
+            # Clean and structured expander for page info
             with st.expander("ℹ️ Click here for detailed URL & Page Information"):
                 st.markdown(f"**Target URL:** `{features['full_url']}`")
                 st.markdown(f"**Final Destination:** `{content.get('final_url', features['full_url'])}`")
-                st.markdown(f"**Page Purpose / Info Preview:**")
-                st.info(content.get('text_sample', 'No textual data available')[:500] + "...")
+                st.markdown(f"**Page Title:** {content.get('title') or 'N/A'}")
+                st.markdown(f"**Forms Detected:** {content['form_count']} | **Password Fields:** {content['password_field_count']}")
+                st.markdown("**Page Content / Purpose Preview:**")
+                st.info(content.get('text_sample', 'No textual data available')[:600] + "...")
         else:
             st.warning(f"Could not scrape live content: {content.get('error')}")
 
@@ -483,6 +477,11 @@ def main():
             for flag in ai_result["red_flags"]:
                 st.write(f"- {flag}")
         st.info(f"💡 **Recommendation:** {ai_result.get('recommendation', 'N/A')}")
+
+        # Dedicated JSON Format Section right below summary/AI results
+        st.markdown("---")
+        st.markdown("### 📋 AI Structured Response (JSON Format)")
+        st.code(json.dumps(ai_result, indent=4), language="json")
     else:
         st.warning(f"AI analysis unavailable: {ai_error}")
 
