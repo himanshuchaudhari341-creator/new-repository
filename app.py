@@ -7,7 +7,7 @@ import re
 import socket
 import ssl
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -163,16 +163,12 @@ def check_ssl_certificate(domain: str) -> dict:
             "subject": subject.get("commonName", domain),
             "not_after": not_after,
         }
-    except (socket.timeout, socket.gaierror, ConnectionRefusedError, OSError) as e:
-        return {"valid": False, "error": f"Connection failed: {e}"}
-    except ssl.SSLError as e:
-        return {"valid": False, "error": f"SSL handshake failed: {e}"}
     except Exception as e:
-        return {"valid": False, "error": f"Unexpected SSL error: {e}"}
+        return {"valid": False, "error": f"SSL error: {e}"}
 
 
 # ============================================================================
-# LAYER 3 — LIVE CONTENT SCRAPING
+# LAYER 3 — LIVE CONTENT SCRAPING (WITH ENCODING FIX)
 # ============================================================================
 
 def scrape_site_content(url: str) -> dict:
@@ -181,16 +177,15 @@ def scrape_site_content(url: str) -> dict:
         response = requests.get(
             url, headers=headers, timeout=REQUEST_TIMEOUT, allow_redirects=True
         )
+        response.encoding = response.apparent_encoding  # Fixes foreign character/encoding issues
+        
         soup = BeautifulSoup(response.text, "html.parser")
-
         title = soup.title.get_text(strip=True) if soup.title else ""
 
         for tag in soup(["script", "style", "noscript", "svg", "head"]):
             tag.decompose()
 
-        raw_strings = [s.strip() for s in soup.stripped_strings]
-        raw_strings = [s for s in raw_strings if s]
-        visible_text = " ".join(raw_strings)
+        visible_text = soup.get_text(separator=' ', strip=True)
         text_sample = visible_text[:3000]
 
         forms = soup.find_all("form")
@@ -211,11 +206,11 @@ def scrape_site_content(url: str) -> dict:
             "iframe_count": len(iframes),
         }
     except Exception as e:
-        return {"success": False, "error": f"Unexpected scraping error: {e}"}
+        return {"success": False, "error": str(e)}
 
 
 # ============================================================================
-# HEURISTIC SCORING ENGINE & BROKEN RULES TRACKER
+# HEURISTIC SCORING ENGINE
 # ============================================================================
 
 def compute_heuristic_score(features: dict, ssl_info: dict, content: dict) -> dict:
@@ -286,11 +281,13 @@ def compute_heuristic_score(features: dict, ssl_info: dict, content: dict) -> di
 
 
 # ============================================================================
-# LAYER 4 — AI CONTEXTUAL ANALYSIS ENGINE
+# LAYER 4 — AI CONTEXTUAL ANALYSIS ENGINE (WITH ENGLISH TRANSLATION RULE)
 # ============================================================================
 
 SYSTEM_INSTRUCTION = """You are a senior cybersecurity threat analyst in the year 2026, \
 specializing in phishing detection, brand impersonation, and social engineering analysis. \
+IMPORTANT: Regardless of the source website language or foreign text, you MUST analyze the content \
+and provide your summary, red flags, and recommendations IN ENGLISH ONLY. \
 Respond with STRICT JSON ONLY, no markdown fences, matching exactly this schema:
 {
   "risk_level": "High" | "Medium" | "Low",
@@ -351,7 +348,6 @@ def combine_verdict(heuristic: dict, ai_result: dict | None) -> dict:
         }
     
     ai_confidence = ai_result.get("confidence", 95)
-
     return {
         "final_risk_level": ai_result.get("risk_level", heuristic["risk_level"]),
         "final_confidence": ai_confidence,
