@@ -185,7 +185,9 @@ def scrape_site_content(url: str) -> dict:
         for tag in soup(["script", "style", "noscript", "svg", "head"]):
             tag.decompose()
 
-        visible_text = soup.get_text(separator=' ', strip=True)
+        raw_strings = [s.strip() for s in soup.stripped_strings]
+        raw_strings = [s for s in raw_strings if s]
+        visible_text = " ".join(raw_strings)
         text_sample = visible_text[:3000]
 
         forms = soup.find_all("form")
@@ -206,7 +208,7 @@ def scrape_site_content(url: str) -> dict:
             "iframe_count": len(iframes),
         }
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        return {"success": False, "error": f"Unexpected scraping error: {e}"}
 
 
 # ============================================================================
@@ -286,8 +288,6 @@ def compute_heuristic_score(features: dict, ssl_info: dict, content: dict) -> di
 
 SYSTEM_INSTRUCTION = """You are a senior cybersecurity threat analyst in the year 2026, \
 specializing in phishing detection, brand impersonation, and social engineering analysis. \
-IMPORTANT: Regardless of the source website language or foreign text, you MUST analyze the content \
-and provide your summary, red flags, and recommendations IN ENGLISH ONLY. \
 Respond with STRICT JSON ONLY, no markdown fences, matching exactly this schema:
 {
   "risk_level": "High" | "Medium" | "Low",
