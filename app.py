@@ -168,7 +168,7 @@ def check_ssl_certificate(domain: str) -> dict:
 
 
 # ============================================================================
-# LAYER 3 — LIVE CONTENT SCRAPING (WITH ENCODING FIX)
+# LAYER 3 — LIVE CONTENT SCRAPING
 # ============================================================================
 
 def scrape_site_content(url: str) -> dict:
@@ -177,7 +177,7 @@ def scrape_site_content(url: str) -> dict:
         response = requests.get(
             url, headers=headers, timeout=REQUEST_TIMEOUT, allow_redirects=True
         )
-        response.encoding = response.apparent_encoding  # Fixes foreign character/encoding issues
+        response.encoding = response.apparent_encoding  
         
         soup = BeautifulSoup(response.text, "html.parser")
         title = soup.title.get_text(strip=True) if soup.title else ""
@@ -281,7 +281,7 @@ def compute_heuristic_score(features: dict, ssl_info: dict, content: dict) -> di
 
 
 # ============================================================================
-# LAYER 4 — AI CONTEXTUAL ANALYSIS ENGINE (WITH ENGLISH TRANSLATION RULE)
+# LAYER 4 — AI CONTEXTUAL ANALYSIS ENGINE
 # ============================================================================
 
 SYSTEM_INSTRUCTION = """You are a senior cybersecurity threat analyst in the year 2026, \
