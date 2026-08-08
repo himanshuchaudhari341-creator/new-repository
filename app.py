@@ -168,7 +168,7 @@ def check_ssl_certificate(domain: str) -> dict:
 
 
 # ============================================================================
-# LAYER 3 — LIVE CONTENT SCRAPING
+# LAYER 3 — LIVE CONTENT SCRAPING (CLEAN & READABLE)
 # ============================================================================
 
 def scrape_site_content(url: str) -> dict:
@@ -182,13 +182,24 @@ def scrape_site_content(url: str) -> dict:
         soup = BeautifulSoup(response.text, "html.parser")
         title = soup.title.get_text(strip=True) if soup.title else ""
 
-        for tag in soup(["script", "style", "noscript", "svg", "head"]):
+        # Remove unnecessary structural and navigation tags
+        for tag in soup(["script", "style", "noscript", "svg", "head", "nav", "footer", "header"]):
             tag.decompose()
 
-        raw_strings = [s.strip() for s in soup.stripped_strings]
-        raw_strings = [s for s in raw_strings if s]
-        visible_text = " ".join(raw_strings)
-        text_sample = visible_text[:3000]
+        ignore_phrases = {
+            "skip to content", "navigation menu", "sign in", "sign up", 
+            "log in", "menu", "search", "cookie", "privacy policy", "terms"
+        }
+
+        clean_sentences = []
+        for s in soup.stripped_strings:
+            text_lower = s.lower()
+            if text_lower in ignore_phrases or len(s) < 3:
+                continue
+            clean_sentences.append(s)
+
+        visible_text = " ".join(clean_sentences)
+        text_sample = visible_text[:3000] if visible_text else "No meaningful text found."
 
         forms = soup.find_all("form")
         password_inputs = soup.find_all("input", attrs={"type": "password"})
@@ -286,7 +297,7 @@ def compute_heuristic_score(features: dict, ssl_info: dict, content: dict) -> di
 # LAYER 4 — AI CONTEXTUAL ANALYSIS ENGINE (EASY ENGLISH INSTRUCTION)
 # ============================================================================
 
-SYSTEM_INSTRUCTION = SYSTEM_INSTRUCTION = """You are a senior cybersecurity threat analyst. \
+SYSTEM_INSTRUCTION = """You are a senior cybersecurity threat analyst. \
 IMPORTANT: Look closely for brand name combinations (like 'sugar-outlook' combining a brand name with a word). Even if there is no login form, if a domain mimics a known brand or looks like a deceptive decoy page, rate it as High or Medium risk. \
 Write your summary, red flags, and recommendations in VERY SIMPLE, EASY-TO-UNDERSTAND ENGLISH. \
 Respond with STRICT JSON ONLY, no markdown fences, matching exactly this schema:
