@@ -286,8 +286,9 @@ def compute_heuristic_score(features: dict, ssl_info: dict, content: dict) -> di
 # LAYER 4 — AI CONTEXTUAL ANALYSIS ENGINE (EASY ENGLISH INSTRUCTION)
 # ============================================================================
 
-SYSTEM_INSTRUCTION = """You are a senior cybersecurity threat analyst. \
-IMPORTANT: Write your summary, red flags, and recommendations in VERY SIMPLE, EASY-TO-UNDERSTAND ENGLISH so that a normal person can easily read and understand it without technical confusion. Keep the details complete and detailed, but use plain words. \
+SYSTEM_INSTRUCTION = SYSTEM_INSTRUCTION = """You are a senior cybersecurity threat analyst. \
+IMPORTANT: Look closely for brand name combinations (like 'sugar-outlook' combining a brand name with a word). Even if there is no login form, if a domain mimics a known brand or looks like a deceptive decoy page, rate it as High or Medium risk. \
+Write your summary, red flags, and recommendations in VERY SIMPLE, EASY-TO-UNDERSTAND ENGLISH. \
 Respond with STRICT JSON ONLY, no markdown fences, matching exactly this schema:
 {
   "risk_level": "High" | "Medium" | "Low",
