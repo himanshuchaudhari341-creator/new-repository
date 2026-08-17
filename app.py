@@ -1,13 +1,14 @@
 """
-ShealdX — Professional Hybrid Phishing Analyzer
+ShealdX — Professional Hybrid Phishing Analyzer1
 """
 import json
+import logging
 import os
 import re
 import socket
 import ssl
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -28,6 +29,12 @@ try:
     GENAI_SDK_AVAILABLE = True
 except ImportError:
     GENAI_SDK_AVAILABLE = False
+
+# The google-genai SDK logs an informational (harmless) message recommending
+# the Chat API over direct generate_content() calls — not an error, just
+# noisy in the terminal. Silencing it here so it doesn't look alarming.
+logging.getLogger("google_genai").setLevel(logging.ERROR)
+logging.getLogger("google_genai.models").setLevel(logging.ERROR)
 
 
 # ============================================================================
@@ -88,15 +95,12 @@ def load_html(filename: str) -> str:
 def get_ip_and_location(domain):
     """Resolves IP + geo/hosting info with a fallback chain across three free
     providers — since any single free IP-geolocation API can rate-limit or
-    go down temporarily, relying on just one made results inconsistent
-    (e.g. 'Unknown, Unknown' on some scans and full data on others for the
-    exact same domain). Trying providers in sequence makes results reliable."""
+    go down temporarily, relying on just one made results inconsistent."""
     try:
         ip = socket.gethostbyname(domain)
     except Exception:
         return {"ip": "N/A", "location": "N/A", "org": "N/A"}
 
-    # Provider 1: ipapi.co
     try:
         r = requests.get(f"https://ipapi.co/{ip}/json/", timeout=5).json()
         if not r.get("error"):
@@ -108,7 +112,6 @@ def get_ip_and_location(domain):
     except Exception:
         pass
 
-    # Provider 2: ip-api.com (different rate-limit pool — good fallback)
     try:
         r = requests.get(f"http://ip-api.com/json/{ip}", timeout=5).json()
         if r.get("status") == "success":
@@ -119,7 +122,6 @@ def get_ip_and_location(domain):
     except Exception:
         pass
 
-    # Provider 3: ipwho.is (no API key required, separate rate-limit pool)
     try:
         r = requests.get(f"https://ipwho.is/{ip}", timeout=5).json()
         if r.get("success", True):
@@ -130,8 +132,6 @@ def get_ip_and_location(domain):
     except Exception:
         pass
 
-    # All three providers failed/rate-limited — return the IP itself at
-    # least, which we always have from the DNS lookup above.
     return {"ip": ip, "location": "Unknown", "org": "Unknown"}
 
 
@@ -202,7 +202,8 @@ def check_ssl_certificate(domain: str) -> dict:
         if not_after:
             try:
                 expiry_dt = datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z")
-                expired = expiry_dt < datetime.utcnow()
+                expiry_dt = expiry_dt.replace(tzinfo=timezone.utc)  # cert dates are always GMT
+                expired = expiry_dt < datetime.now(timezone.utc)
             except ValueError:
                 expired = False
 
@@ -218,76 +219,190 @@ def check_ssl_certificate(domain: str) -> dict:
 
 
 # ============================================================================
-# LAYER 3 — LIVE CONTENT SCRAPING
+# LAYER 3 — LIVE CONTENT SCRAPING (static + headless-browser fallback)
 # ============================================================================
 
-def scrape_site_content(url: str) -> dict:
+def _extract_from_html(html: str, base_url: str) -> dict:
+    """Shared parsing logic used by BOTH the static scraper and the headless
+    browser scraper — takes raw HTML and returns the same structured fields
+    either way, so the rest of the app doesn't need to know which method
+    produced the content."""
+    soup = BeautifulSoup(html, "html.parser")
+    title = soup.title.get_text(strip=True) if soup.title else ""
+
+    for tag in soup(["script", "style", "noscript", "svg", "head"]):
+        tag.decompose()
+
+    raw_strings = [s.strip() for s in soup.stripped_strings if s.strip()]
+
+    seen = set()
+    content_points = []
+    nav_labels = []
+    for s in raw_strings:
+        key = s.lower()
+        if len(s) < 3 or key in seen:
+            continue
+        seen.add(key)
+        if len(s) >= 18 and len(s.split()) >= 4:
+            if len(content_points) < 25:
+                content_points.append(s)
+        else:
+            if len(nav_labels) < 25:
+                nav_labels.append(s)
+
+    visible_text = " ".join(raw_strings)
+    text_sample = visible_text[:3000]
+
+    low_text_signal = visible_text.lower()
+    block_markers = [
+        "captcha", "checking your browser", "enable javascript",
+        "access denied", "are you a human", "cloudflare", "just a moment",
+        "unusual traffic", "please verify you are a human",
+    ]
+    looks_blocked = any(marker in low_text_signal for marker in block_markers)
+    looks_js_shell = len(raw_strings) <= 3 and len(visible_text) < 80
+
+    if content_points:
+        clean_preview = " • ".join(content_points)
+    elif nav_labels:
+        clean_preview = " • ".join(nav_labels[:15])
+    elif looks_blocked:
+        clean_preview = "⚠️ This page appears to show a bot-verification / CAPTCHA challenge instead of real content — the site is blocking automated access."
+    elif looks_js_shell:
+        clean_preview = "⚠️ This page's static HTML is nearly empty — it likely renders its real content via JavaScript (a Single Page App)."
+    else:
+        clean_preview = "No readable text content was found on this page."
+
+    forms = soup.find_all("form")
+    password_inputs = soup.find_all("input", attrs={"type": "password"})
+    all_inputs = soup.find_all("input")
+    iframes = soup.find_all("iframe")
+
+    return {
+        "title": title,
+        "text_sample": text_sample,
+        "content_points": content_points,
+        "nav_labels": nav_labels,
+        "clean_preview": clean_preview,
+        "form_count": len(forms),
+        "password_field_count": len(password_inputs),
+        "total_input_count": len(all_inputs),
+        "iframe_count": len(iframes),
+        "looks_blocked": looks_blocked,
+        "looks_js_shell": looks_js_shell,
+    }
+
+
+def _scrape_static(url: str) -> dict:
+    """Fast scrape using requests + BeautifulSoup. Does NOT execute
+    JavaScript, so modern Single Page Apps (React/Vue — e.g. Instagram)
+    return a near-empty static HTML shell here even though the real page
+    has plenty of content once JS runs."""
     headers = {"User-Agent": USER_AGENT, "Accept-Language": "en-US,en;q=0.9"}
     try:
         response = requests.get(
             url, headers=headers, timeout=REQUEST_TIMEOUT, allow_redirects=True
         )
         response.encoding = response.apparent_encoding
-
-        soup = BeautifulSoup(response.text, "html.parser")
-        title = soup.title.get_text(strip=True) if soup.title else ""
-
-        for tag in soup(["script", "style", "noscript", "svg", "head"]):
-            tag.decompose()
-
-        # NOTE: soup.get_text() alone joins EVERY text node verbatim,
-        # including duplicate nav items that appear twice in the raw HTML
-        # (once for desktop menu, once for a hidden mobile menu — e.g.
-        # "Home Explore Wallet Video ... Home Explore Wallet Video" back to
-        # back). We instead walk stripped_strings and deduplicate, and
-        # separate short nav/button labels from real sentence-like content
-        # so the preview shown to the user is clean and non-repetitive.
-        raw_strings = [s.strip() for s in soup.stripped_strings if s.strip()]
-
-        seen = set()
-        content_points = []
-        nav_labels = []
-        for s in raw_strings:
-            key = s.lower()
-            if len(s) < 3 or key in seen:
-                continue
-            seen.add(key)
-            if len(s) >= 18 and len(s.split()) >= 4:
-                if len(content_points) < 25:
-                    content_points.append(s)
-            else:
-                if len(nav_labels) < 25:
-                    nav_labels.append(s)
-
-        visible_text = " ".join(raw_strings)
-        text_sample = visible_text[:3000]
-        # Clean, deduplicated preview used for display — this is what fixes
-        # the "Install Home Explore ... Home Explore Wallet Video More..."
-        # repeated-junk problem in the UI.
-        clean_preview = " • ".join(content_points) if content_points else " • ".join(nav_labels[:15])
-
-        forms = soup.find_all("form")
-        password_inputs = soup.find_all("input", attrs={"type": "password"})
-        all_inputs = soup.find_all("input")
-        iframes = soup.find_all("iframe")
+        extracted = _extract_from_html(response.text, url)
 
         return {
             "success": True,
             "status_code": response.status_code,
             "final_url": response.url,
             "redirected": response.url != url,
-            "title": title,
-            "text_sample": text_sample,
-            "content_points": content_points,
-            "nav_labels": nav_labels,
-            "clean_preview": clean_preview,
-            "form_count": len(forms),
-            "password_field_count": len(password_inputs),
-            "total_input_count": len(all_inputs),
-            "iframe_count": len(iframes),
+            "rendered_with_js": False,
+            **extracted,
         }
-    except Exception as e:
+    except requests.exceptions.SSLError as e:
+        return {"success": False, "error": f"SSL error during scrape: {e}"}
+    except requests.exceptions.Timeout:
+        return {"success": False, "error": "Request timed out — site may be blocking bots or is unreachable."}
+    except requests.exceptions.ConnectionError as e:
+        return {"success": False, "error": f"Connection error: {e}"}
+    except requests.exceptions.RequestException as e:
+        return {"success": False, "error": f"Request failed: {e}"}
+    except Exception as e:  # noqa: BLE001
         return {"success": False, "error": str(e)}
+
+
+HEADLESS_TIMEOUT_MS = 12000
+THIN_CONTENT_CHAR_THRESHOLD = 250
+
+
+def _is_thin_content(static_result: dict) -> bool:
+    """Heuristic: did the static scraper likely miss JS-rendered content?"""
+    if not static_result.get("success"):
+        return False  # a hard failure isn't "thin" — headless likely won't help either
+    no_real_content = len(static_result.get("content_points") or []) == 0
+    short_text = len(static_result.get("text_sample") or "") < THIN_CONTENT_CHAR_THRESHOLD
+    return no_real_content and short_text
+
+
+def _scrape_headless(url: str) -> dict:
+    """Renders the page in a real headless Chromium browser so client-side
+    JavaScript content becomes visible — fixes the 'thin scrape' problem on
+    modern SPAs (e.g. Instagram) that the fast static scraper cannot see."""
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        return {
+            "success": False,
+            "error": "Headless browser engine not installed. Run: pip install playwright && playwright install chromium",
+        }
+
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            try:
+                context = browser.new_context(user_agent=USER_AGENT)
+                page = context.new_page()
+                page.set_default_timeout(HEADLESS_TIMEOUT_MS)
+                response = page.goto(url, wait_until="networkidle")
+                final_url = page.url
+                html = page.content()
+                status_code = response.status if response else None
+            finally:
+                browser.close()
+    except Exception as e:  # noqa: BLE001 — Playwright raises many exception types
+        return {"success": False, "error": f"Headless browser scrape failed: {e}"}
+
+    extracted = _extract_from_html(html, url)
+
+    return {
+        "success": True,
+        "status_code": status_code,
+        "final_url": final_url,
+        "redirected": final_url != url,
+        "rendered_with_js": True,
+        **extracted,
+    }
+
+
+def scrape_site_content(url: str) -> dict:
+    """Two-stage scraping pipeline:
+      1. Fast static scrape (requests + BeautifulSoup) — used by default.
+      2. If that comes back "thin" (typical of JS-heavy SPAs like Instagram),
+         automatically retry with a real headless browser (Playwright) that
+         executes JavaScript, so client-side-rendered content is captured.
+    This keeps the common case fast while still handling modern SPAs
+    correctly — the fallback only triggers when it's actually needed.
+    """
+    static_result = _scrape_static(url)
+
+    if not _is_thin_content(static_result):
+        return static_result
+
+    headless_result = _scrape_headless(url)
+    if headless_result.get("success"):
+        headless_result["fallback_triggered"] = True
+        return headless_result
+
+    # Headless fallback failed (e.g. Playwright not installed on this host) —
+    # return the original static result so the pipeline still has something
+    # to work with, but flag that a richer scrape was attempted and failed.
+    static_result["headless_fallback_error"] = headless_result.get("error")
+    return static_result
 
 
 # ============================================================================
@@ -387,7 +502,12 @@ def build_ai_prompt(features: dict, ssl_info: dict, content: dict, heuristic: di
         "domain": features["domain"],
         "heuristic_features": features,
         "ssl_certificate": ssl_info,
-        "scraped_page": {"success": content.get("success"), "title": content.get("title"), "text_sample": text_sample},
+        "scraped_page": {
+            "success": content.get("success"),
+            "title": content.get("title"),
+            "text_sample": text_sample,
+            "rendered_with_js": content.get("rendered_with_js", False),
+        },
         "preliminary_heuristic_score": heuristic["score"],
     }
     return "Analyze the following target for phishing risk. Data:\n\n" + json.dumps(payload, indent=2, default=str)
@@ -564,6 +684,8 @@ def main():
         st.subheader("🌐 Live Content Scan")
         if content.get("success"):
             st.success("Page fetched successfully.")
+            if content.get("rendered_with_js"):
+                st.info("🧭 Static scrape returned thin content — automatically re-scanned using a **headless browser** (JavaScript executed) for a richer, more accurate read of this page.")
 
             with st.expander("ℹ️ Click here for detailed URL & Page Information"):
                 st.markdown(f"**Target URL:** `{features['full_url']}`")
@@ -571,7 +693,7 @@ def main():
                 st.markdown(f"**Page Title:** {content.get('title') or 'N/A'}")
                 st.markdown(f"**Forms Detected:** {content['form_count']} | **Password Fields:** {content['password_field_count']}")
                 st.markdown("**Page Content / Purpose Preview:**")
-                preview = content.get("clean_preview") or "No textual content could be identified on this page."
+                preview = content.get("clean_preview") or "No readable text content was found on this page."
                 st.info(preview[:600] + ("..." if len(preview) > 600 else ""))
         else:
             st.warning(f"Could not scrape live content: {content.get('error')}")
