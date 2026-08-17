@@ -381,12 +381,28 @@ def _scrape_headless(url: str) -> dict:
 
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            # --no-sandbox / --disable-dev-shm-usage / --disable-gpu are
+            # standard requirements for running headless Chromium inside
+            # constrained, memory-limited containers (like Streamlit Cloud's
+            # free tier) — without them the browser process can crash mid-
+            # navigation, which surfaces as a confusing "browser has been
+            # closed" error rather than a clear resource error.
+            browser = p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+            )
             try:
                 context = browser.new_context(user_agent=USER_AGENT)
                 page = context.new_page()
                 page.set_default_timeout(HEADLESS_TIMEOUT_MS)
-                response = page.goto(url, wait_until="networkidle")
+                # NOTE: wait_until="networkidle" is unreliable on modern
+                # sites that keep background network activity running
+                # forever (analytics beacons, polling, live-update sockets)
+                # — the page never truly goes "idle", causing timeouts/
+                # crashes. "domcontentloaded" + a short fixed settle time
+                # is the more robust, Playwright-recommended approach.
+                response = page.goto(url, wait_until="domcontentloaded")
+                page.wait_for_timeout(2500)  # let client-side JS finish rendering
                 final_url = page.url
                 html = page.content()
                 status_code = response.status if response else None
