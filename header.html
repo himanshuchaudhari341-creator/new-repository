@@ -1,17 +1,169 @@
-<div style="
-    padding: 1.5rem 1.75rem;
-    border-radius: 12px;
-    border: 1px solid rgba(120,120,120,0.25);
-    background: linear-gradient(135deg, rgba(30,64,175,0.08), rgba(15,118,110,0.08));
-    margin-bottom: 1.5rem;
-">
-    <div style="display:flex; align-items:center; gap:12px; margin-bottom:6px;">
-        <span style="font-size:28px;">🛡️</span>
-        <span style="font-size:26px; font-weight:700; letter-spacing:0.3px;">
-            ShealdX
-        </span>
+<style>
+@keyframes sx-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(34,197,94,0.55); }
+  70%  { box-shadow: 0 0 0 8px rgba(34,197,94,0); }
+  100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); }
+}
+@keyframes sx-glow {
+  0%, 100% { box-shadow: 0 0 18px 2px rgba(34,211,238,0.35); }
+  50%      { box-shadow: 0 0 28px 6px rgba(34,211,238,0.55); }
+}
+@keyframes sx-fade-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.sx-header-wrap{
+  position:relative;
+  overflow:hidden;
+  padding:2rem 2.25rem;
+  border-radius:16px;
+  border:1px solid rgba(148,163,184,0.18);
+  background:
+    radial-gradient(circle at 15% 20%, rgba(34,211,238,0.10), transparent 45%),
+    radial-gradient(circle at 85% 80%, rgba(167,139,250,0.10), transparent 45%),
+    linear-gradient(135deg, #0B1120 0%, #111C33 55%, #0B1120 100%);
+  margin-bottom:1.5rem;
+  animation: sx-fade-in 0.5s ease-out;
+}
+.sx-header-wrap::before{
+  content:"";
+  position:absolute; inset:0;
+  background-image:
+    linear-gradient(rgba(148,163,184,0.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148,163,184,0.05) 1px, transparent 1px);
+  background-size:28px 28px;
+  pointer-events:none;
+}
+
+.sx-header-top{
+  position:relative;
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  flex-wrap:wrap;
+  gap:14px;
+}
+.sx-header-left{
+  display:flex;
+  align-items:center;
+  gap:16px;
+}
+.sx-shield-badge{
+  width:58px; height:58px;
+  border-radius:14px;
+  display:flex; align-items:center; justify-content:center;
+  font-size:28px;
+  background:linear-gradient(135deg, rgba(34,211,238,0.18), rgba(167,139,250,0.18));
+  border:1px solid rgba(34,211,238,0.4);
+  animation: sx-glow 3.2s ease-in-out infinite;
+}
+.sx-title-block .sx-name{
+  font-size:30px;
+  font-weight:800;
+  letter-spacing:0.2px;
+  line-height:1.1;
+  background:linear-gradient(90deg, #FFFFFF 0%, #A5F3FC 60%, #67E8F9 100%);
+  -webkit-background-clip:text;
+  background-clip:text;
+  color:transparent;
+}
+.sx-title-block .sx-tag{
+  font-size:13.5px;
+  color:#94A3B8;
+  margin-top:2px;
+}
+
+.sx-status{
+  display:flex; align-items:center; gap:8px;
+  font-size:12.5px;
+  color:#86EFAC;
+  background:rgba(34,197,94,0.08);
+  border:1px solid rgba(34,197,94,0.3);
+  padding:6px 12px;
+  border-radius:999px;
+}
+.sx-status .dot{
+  width:8px; height:8px; border-radius:50%;
+  background:#22C55E;
+  animation: sx-pulse 1.8s infinite;
+}
+
+.sx-welcome{
+  position:relative;
+  margin-top:16px;
+  font-size:15.5px;
+  font-weight:600;
+  color:#E2E8F0;
+}
+.sx-subtext{
+  position:relative;
+  margin-top:4px;
+  font-size:13px;
+  color:#94A3B8;
+  max-width:780px;
+}
+
+.sx-badge-row{
+  position:relative;
+  display:flex;
+  flex-wrap:wrap;
+  gap:10px;
+  margin-top:18px;
+}
+.sx-badge{
+  display:flex; align-items:center; gap:7px;
+  font-size:12.5px;
+  font-weight:600;
+  color:#E2E8F0;
+  background:rgba(255,255,255,0.04);
+  border:1px solid rgba(148,163,184,0.22);
+  padding:7px 13px;
+  border-radius:10px;
+  transition: all 0.2s ease;
+}
+.sx-badge:hover{
+  border-color:rgba(34,211,238,0.55);
+  background:rgba(34,211,238,0.08);
+  transform: translateY(-1px);
+}
+.sx-badge .ic{ font-size:14px; }
+
+.sx-footnote{
+  position:relative;
+  margin-top:16px;
+  font-size:11.5px;
+  color:#64748B;
+  border-top:1px solid rgba(148,163,184,0.14);
+  padding-top:12px;
+}
+</style>
+
+<div class="sx-header-wrap">
+  <div class="sx-header-top">
+    <div class="sx-header-left">
+      <div class="sx-shield-badge">🛡️</div>
+      <div class="sx-title-block">
+        <div class="sx-name">ShealdX Professional</div>
+        <div class="sx-tag">Hybrid Phishing Threat Analyzer</div>
+      </div>
     </div>
-    <div style="font-size:15px; font-weight:600; opacity:0.9;">
-        Welcome to ShealdX — your trusted shield against phishing threats.
-    </div>
+    <div class="sx-status"><span class="dot"></span> Engine Online</div>
+  </div>
+
+  <div class="sx-welcome">Welcome to ShealdX — your trusted shield against phishing threats.</div>
+  <div class="sx-subtext">
+    Every scan runs through four independent layers — URL heuristics, live SSL/TLS verification,
+    real-time content scraping, and AI-powered contextual reasoning — before a final verdict is issued.
+  </div>
+
+  <div class="sx-badge-row">
+    <div class="sx-badge"><span class="ic">🧬</span> URL Heuristics</div>
+    <div class="sx-badge"><span class="ic">🔒</span> SSL / TLS Verification</div>
+    <div class="sx-badge"><span class="ic">🌐</span> Live Content Scraping</div>
+    <div class="sx-badge"><span class="ic">🤖</span> Gemini AI Reasoning</div>
+    <div class="sx-badge"><span class="ic">🎯</span> Zero Whitelist Policy</div>
+  </div>
+
+  <div class="sx-footnote">No domain is ever pre-trusted — every URL is evaluated from scratch, every single time.</div>
 </div>
