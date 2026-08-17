@@ -69,20 +69,70 @@ def shannon_entropy(text: str) -> float:
 
 
 # ============================================================================
+# HELPER: LOAD STATIC HTML (header banner)
+# ============================================================================
+
+def load_html(filename: str) -> str:
+    """Load a static HTML/CSS snippet (the header banner) from the project folder."""
+    path = Path(__file__).parent / filename
+    try:
+        return path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
+
+
+# ============================================================================
 # HELPER: GET GEO LOCATION & IP DATA
 # ============================================================================
 
 def get_ip_and_location(domain):
+    """Resolves IP + geo/hosting info with a fallback chain across three free
+    providers — since any single free IP-geolocation API can rate-limit or
+    go down temporarily, relying on just one made results inconsistent
+    (e.g. 'Unknown, Unknown' on some scans and full data on others for the
+    exact same domain). Trying providers in sequence makes results reliable."""
     try:
         ip = socket.gethostbyname(domain)
-        response = requests.get(f"https://ipapi.co/{ip}/json/", timeout=5).json()
-        return {
-            "ip": ip,
-            "location": f"{response.get('city', 'Unknown')}, {response.get('country_name', 'Unknown')}",
-            "org": response.get("org", "Unknown")
-        }
-    except:
+    except Exception:
         return {"ip": "N/A", "location": "N/A", "org": "N/A"}
+
+    # Provider 1: ipapi.co
+    try:
+        r = requests.get(f"https://ipapi.co/{ip}/json/", timeout=5).json()
+        if not r.get("error"):
+            city = r.get("city") or "Unknown"
+            country = r.get("country_name") or "Unknown"
+            org = r.get("org") or "Unknown"
+            if city != "Unknown" or country != "Unknown":
+                return {"ip": ip, "location": f"{city}, {country}", "org": org}
+    except Exception:
+        pass
+
+    # Provider 2: ip-api.com (different rate-limit pool — good fallback)
+    try:
+        r = requests.get(f"http://ip-api.com/json/{ip}", timeout=5).json()
+        if r.get("status") == "success":
+            city = r.get("city") or "Unknown"
+            country = r.get("country") or "Unknown"
+            org = r.get("isp") or r.get("org") or "Unknown"
+            return {"ip": ip, "location": f"{city}, {country}", "org": org}
+    except Exception:
+        pass
+
+    # Provider 3: ipwho.is (no API key required, separate rate-limit pool)
+    try:
+        r = requests.get(f"https://ipwho.is/{ip}", timeout=5).json()
+        if r.get("success", True):
+            city = r.get("city") or "Unknown"
+            country = r.get("country") or "Unknown"
+            org = (r.get("connection") or {}).get("isp") or "Unknown"
+            return {"ip": ip, "location": f"{city}, {country}", "org": org}
+    except Exception:
+        pass
+
+    # All three providers failed/rate-limited — return the IP itself at
+    # least, which we always have from the DNS lookup above.
+    return {"ip": ip, "location": "Unknown", "org": "Unknown"}
 
 
 # ============================================================================
@@ -168,7 +218,7 @@ def check_ssl_certificate(domain: str) -> dict:
 
 
 # ============================================================================
-# LAYER 3 — LIVE CONTENT SCRAPING (CLEAN & READABLE)
+# LAYER 3 — LIVE CONTENT SCRAPING
 # ============================================================================
 
 def scrape_site_content(url: str) -> dict:
@@ -177,29 +227,44 @@ def scrape_site_content(url: str) -> dict:
         response = requests.get(
             url, headers=headers, timeout=REQUEST_TIMEOUT, allow_redirects=True
         )
-        response.encoding = response.apparent_encoding  
-        
+        response.encoding = response.apparent_encoding
+
         soup = BeautifulSoup(response.text, "html.parser")
         title = soup.title.get_text(strip=True) if soup.title else ""
 
-        # Remove unnecessary structural and navigation tags
-        for tag in soup(["script", "style", "noscript", "svg", "head", "nav", "footer", "header"]):
+        for tag in soup(["script", "style", "noscript", "svg", "head"]):
             tag.decompose()
 
-        ignore_phrases = {
-            "skip to content", "navigation menu", "sign in", "sign up", 
-            "log in", "menu", "search", "cookie", "privacy policy", "terms"
-        }
+        # NOTE: soup.get_text() alone joins EVERY text node verbatim,
+        # including duplicate nav items that appear twice in the raw HTML
+        # (once for desktop menu, once for a hidden mobile menu — e.g.
+        # "Home Explore Wallet Video ... Home Explore Wallet Video" back to
+        # back). We instead walk stripped_strings and deduplicate, and
+        # separate short nav/button labels from real sentence-like content
+        # so the preview shown to the user is clean and non-repetitive.
+        raw_strings = [s.strip() for s in soup.stripped_strings if s.strip()]
 
-        clean_sentences = []
-        for s in soup.stripped_strings:
-            text_lower = s.lower()
-            if text_lower in ignore_phrases or len(s) < 3:
+        seen = set()
+        content_points = []
+        nav_labels = []
+        for s in raw_strings:
+            key = s.lower()
+            if len(s) < 3 or key in seen:
                 continue
-            clean_sentences.append(s)
+            seen.add(key)
+            if len(s) >= 18 and len(s.split()) >= 4:
+                if len(content_points) < 25:
+                    content_points.append(s)
+            else:
+                if len(nav_labels) < 25:
+                    nav_labels.append(s)
 
-        visible_text = " ".join(clean_sentences)
-        text_sample = visible_text[:3000] if visible_text else "No meaningful text found."
+        visible_text = " ".join(raw_strings)
+        text_sample = visible_text[:3000]
+        # Clean, deduplicated preview used for display — this is what fixes
+        # the "Install Home Explore ... Home Explore Wallet Video More..."
+        # repeated-junk problem in the UI.
+        clean_preview = " • ".join(content_points) if content_points else " • ".join(nav_labels[:15])
 
         forms = soup.find_all("form")
         password_inputs = soup.find_all("input", attrs={"type": "password"})
@@ -213,13 +278,16 @@ def scrape_site_content(url: str) -> dict:
             "redirected": response.url != url,
             "title": title,
             "text_sample": text_sample,
+            "content_points": content_points,
+            "nav_labels": nav_labels,
+            "clean_preview": clean_preview,
             "form_count": len(forms),
             "password_field_count": len(password_inputs),
             "total_input_count": len(all_inputs),
             "iframe_count": len(iframes),
         }
     except Exception as e:
-        return {"success": False, "error": f"Unexpected scraping error: {e}"}
+        return {"success": False, "error": str(e)}
 
 
 # ============================================================================
@@ -294,20 +362,21 @@ def compute_heuristic_score(features: dict, ssl_info: dict, content: dict) -> di
 
 
 # ============================================================================
-# LAYER 4 — AI CONTEXTUAL ANALYSIS ENGINE (EASY ENGLISH INSTRUCTION)
+# LAYER 4 — AI CONTEXTUAL ANALYSIS ENGINE
 # ============================================================================
 
-SYSTEM_INSTRUCTION = """You are a senior cybersecurity threat analyst. \
-IMPORTANT: Look closely for brand name combinations (like 'sugar-outlook' combining a brand name with a word). Even if there is no login form, if a domain mimics a known brand or looks like a deceptive decoy page, rate it as High or Medium risk. \
-Write your summary, red flags, and recommendations in VERY SIMPLE, EASY-TO-UNDERSTAND ENGLISH. \
+SYSTEM_INSTRUCTION = """You are a senior cybersecurity threat analyst in the year 2026, \
+specializing in phishing detection, brand impersonation, and social engineering analysis. \
+IMPORTANT: Regardless of the source website language or foreign text, you MUST analyze the content \
+and provide your summary, red flags, and recommendations IN ENGLISH ONLY. \
 Respond with STRICT JSON ONLY, no markdown fences, matching exactly this schema:
 {
   "risk_level": "High" | "Medium" | "Low",
   "confidence": <integer 0-100>,
-  "summary": "<detailed 2-3 sentence explanation in simple everyday language>",
-  "red_flags": ["<detailed warning point in simple words>", "..."],
+  "summary": "<2-3 sentence plain-English verdict>",
+  "red_flags": ["<short flag>", "..."],
   "impersonated_brand": "<brand name if suspected, else 'None detected'>",
-  "recommendation": "<clear and simple instruction for the user>"
+  "recommendation": "<one actionable sentence for the end user>"
 }"""
 
 
@@ -358,7 +427,7 @@ def combine_verdict(heuristic: dict, ai_result: dict | None) -> dict:
             "final_confidence": heuristic["score"],
             "basis": "Deterministic Security Audit — URL structure, SSL/TLS validation, and live content inspection.",
         }
-    
+
     ai_confidence = ai_result.get("confidence", 95)
     return {
         "final_risk_level": ai_result.get("risk_level", heuristic["risk_level"]),
@@ -395,8 +464,12 @@ def main():
 
     api_key = get_api_key()
 
-    st.title(APP_TITLE)
-    st.caption("Welcome to ShealdX — your trusted shield against phishing threats.")
+    header_html = load_html("header.html")
+    if header_html:
+        st.markdown(header_html, unsafe_allow_html=True)
+    else:
+        st.title(APP_TITLE)
+        st.caption("Welcome to ShealdX — your trusted shield against phishing threats.")
 
     url_input = st.text_input("🔗 Enter a target URL to analyze", placeholder="e.g. https://example.com/login")
     analyze_clicked = st.button("🔍 Analyze URL", type="primary")
@@ -491,14 +564,15 @@ def main():
         st.subheader("🌐 Live Content Scan")
         if content.get("success"):
             st.success("Page fetched successfully.")
-            
+
             with st.expander("ℹ️ Click here for detailed URL & Page Information"):
                 st.markdown(f"**Target URL:** `{features['full_url']}`")
                 st.markdown(f"**Final Destination:** `{content.get('final_url', features['full_url'])}`")
                 st.markdown(f"**Page Title:** {content.get('title') or 'N/A'}")
                 st.markdown(f"**Forms Detected:** {content['form_count']} | **Password Fields:** {content['password_field_count']}")
                 st.markdown("**Page Content / Purpose Preview:**")
-                st.info(content.get('text_sample', 'No textual data available')[:600] + "...")
+                preview = content.get("clean_preview") or "No textual content could be identified on this page."
+                st.info(preview[:600] + ("..." if len(preview) > 600 else ""))
         else:
             st.warning(f"Could not scrape live content: {content.get('error')}")
 
@@ -508,7 +582,7 @@ def main():
         risk_badge(ai_result["risk_level"])
         st.write(f"**Summary:** {ai_result.get('summary', 'N/A')}")
         st.write(f"**Suspected impersonated brand:** {ai_result.get('impersonated_brand', 'None detected')}")
-        
+
         st.markdown("### JSON Format")
         with st.expander("📋 View Structured Response Data"):
             st.code(json.dumps(ai_result, indent=4), language="json")
