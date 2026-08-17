@@ -339,6 +339,27 @@ def _is_thin_content(static_result: dict) -> bool:
     return no_real_content and short_text
 
 
+@st.cache_resource(show_spinner=False)
+def _ensure_chromium_installed():
+    """Streamlit Community Cloud only runs `pip install -r requirements.txt`
+    (+ apt packages from packages.txt) during build — it never runs
+    `playwright install chromium`, so the browser binary is simply missing
+    at runtime on a fresh deploy. We trigger the download here, once,
+    the first time the headless fallback is actually needed, and cache
+    the result for the lifetime of this container so it only happens once.
+    """
+    import subprocess
+    import sys
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "playwright", "install", "chromium"],
+            check=True, capture_output=True, text=True, timeout=300,
+        )
+        return {"ok": True, "log": result.stdout[-500:] if result.stdout else ""}
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "error": str(e)}
+
+
 def _scrape_headless(url: str) -> dict:
     """Renders the page in a real headless Chromium browser so client-side
     JavaScript content becomes visible — fixes the 'thin scrape' problem on
@@ -349,6 +370,13 @@ def _scrape_headless(url: str) -> dict:
         return {
             "success": False,
             "error": "Headless browser engine not installed. Run: pip install playwright && playwright install chromium",
+        }
+
+    install_result = _ensure_chromium_installed()
+    if not install_result.get("ok"):
+        return {
+            "success": False,
+            "error": f"Could not auto-install headless browser: {install_result.get('error')}",
         }
 
     try:
