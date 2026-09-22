@@ -42,7 +42,7 @@ logging.getLogger("google_genai.models").setLevel(logging.ERROR)
 # ============================================================================
 
 APP_TITLE = "🛡️ ShealdX Professional"
-AI_MODEL = "gemini-3.8-flash"
+AI_MODEL = "gemini-3.5-flash"
 REQUEST_TIMEOUT = 12
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
