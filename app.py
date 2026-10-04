@@ -8,6 +8,7 @@ import re
 import socket
 import ssl
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
@@ -42,7 +43,7 @@ logging.getLogger("google_genai.models").setLevel(logging.ERROR)
 # ============================================================================
 
 APP_TITLE = "🛡️ ShealdX Professional"
-AI_MODEL = "gemini-3.5-flash"
+AI_MODEL = "gemini-3.6-flash"
 REQUEST_TIMEOUT = 12
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -92,17 +93,20 @@ def load_html(filename: str) -> str:
 # HELPER: GET GEO LOCATION & IP DATA
 # ============================================================================
 
+@st.cache_data(ttl=3600, show_spinner=False)
 def get_ip_and_location(domain):
     """Resolves IP + geo/hosting info with a fallback chain across three free
     providers — since any single free IP-geolocation API can rate-limit or
-    go down temporarily, relying on just one made results inconsistent."""
+    go down temporarily, relying on just one made results inconsistent.
+    Cached per-domain for 1 hour: repeat scans of the same site (very common
+    during testing/demos) become instant instead of re-querying every time."""
     try:
         ip = socket.gethostbyname(domain)
     except Exception:
         return {"ip": "N/A", "location": "N/A", "org": "N/A"}
 
     try:
-        r = requests.get(f"https://ipapi.co/{ip}/json/", timeout=5).json()
+        r = requests.get(f"https://ipapi.co/{ip}/json/", timeout=3).json()
         if not r.get("error"):
             city = r.get("city") or "Unknown"
             country = r.get("country_name") or "Unknown"
@@ -113,7 +117,7 @@ def get_ip_and_location(domain):
         pass
 
     try:
-        r = requests.get(f"http://ip-api.com/json/{ip}", timeout=5).json()
+        r = requests.get(f"http://ip-api.com/json/{ip}", timeout=3).json()
         if r.get("status") == "success":
             city = r.get("city") or "Unknown"
             country = r.get("country") or "Unknown"
@@ -123,7 +127,7 @@ def get_ip_and_location(domain):
         pass
 
     try:
-        r = requests.get(f"https://ipwho.is/{ip}", timeout=5).json()
+        r = requests.get(f"https://ipwho.is/{ip}", timeout=3).json()
         if r.get("success", True):
             city = r.get("city") or "Unknown"
             country = r.get("country") or "Unknown"
@@ -381,15 +385,23 @@ def _scrape_headless(url: str) -> dict:
 
     try:
         with sync_playwright() as p:
-            # --no-sandbox / --disable-dev-shm-usage / --disable-gpu are
-            # standard requirements for running headless Chromium inside
-            # constrained, memory-limited containers (like Streamlit Cloud's
-            # free tier) — without them the browser process can crash mid-
-            # navigation, which surfaces as a confusing "browser has been
-            # closed" error rather than a clear resource error.
+            # Memory-saving flags for constrained containers (e.g. Streamlit
+            # Cloud's free tier, ~1GB RAM) — headless Chromium can otherwise
+            # be killed mid-navigation on memory-heavy sites, surfacing as a
+            # confusing "browser has been closed" error.
             browser = p.chromium.launch(
                 headless=True,
-                args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-extensions",
+                    "--disable-background-networking",
+                    "--disable-sync",
+                    "--disable-translate",
+                    "--disable-default-apps",
+                    "--js-flags=--max-old-space-size=256",
+                ],
             )
             try:
                 context = browser.new_context(user_agent=USER_AGENT)
@@ -402,12 +414,30 @@ def _scrape_headless(url: str) -> dict:
                 # crashes. "domcontentloaded" + a short fixed settle time
                 # is the more robust, Playwright-recommended approach.
                 response = page.goto(url, wait_until="domcontentloaded")
-                page.wait_for_timeout(2500)  # let client-side JS finish rendering
-                final_url = page.url
-                html = page.content()
                 status_code = response.status if response else None
+
+                # If the browser process dies during the settle-wait (e.g.
+                # killed for memory on a constrained host), don't throw away
+                # the DOM content that already loaded successfully — try to
+                # grab it before giving up.
+                try:
+                    page.wait_for_timeout(2500)  # let client-side JS finish rendering
+                except Exception:
+                    pass
+
+                try:
+                    final_url = page.url
+                    html = page.content()
+                except Exception:
+                    # Page died even before we could read it back — fall
+                    # back to what we already know rather than crashing.
+                    final_url = url
+                    html = ""
             finally:
-                browser.close()
+                try:
+                    browser.close()
+                except Exception:
+                    pass
     except Exception as e:  # noqa: BLE001 — Playwright raises many exception types
         return {"success": False, "error": f"Headless browser scrape failed: {e}"}
 
@@ -557,7 +587,16 @@ def build_ai_prompt(features: dict, ssl_info: dict, content: dict, heuristic: di
     return "Analyze the following target for phishing risk. Data:\n\n" + json.dumps(payload, indent=2, default=str)
 
 
-def analyze_with_ai(api_key: str, prompt: str, max_retries: int = 3):
+def analyze_with_ai(api_key: str, prompt: str, max_retries: int = 4):
+    """Returns (result_dict_or_None, error_string_or_None).
+
+    Automatically retries with exponential backoff (2s, 4s, 8s...) on
+    transient 503 'model overloaded' errors — these are temporary demand
+    spikes on Google's side, not a problem with our request, and usually
+    need more than a couple seconds to clear. Permanent errors (bad API
+    key, quota exhausted, permission denied) fail immediately instead of
+    wasting retries on something that will never succeed.
+    """
     if not GENAI_SDK_AVAILABLE or not api_key:
         return None, "AI engine dependency or API key not available."
 
@@ -568,6 +607,8 @@ def analyze_with_ai(api_key: str, prompt: str, max_retries: int = 3):
         max_output_tokens=2048,
     )
 
+    last_error = None
+
     for attempt in range(max_retries):
         try:
             response = client.models.generate_content(
@@ -577,11 +618,30 @@ def analyze_with_ai(api_key: str, prompt: str, max_retries: int = 3):
             cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text, flags=re.MULTILINE).strip()
             data = json.loads(cleaned)
             return data, None
-        except Exception as e:
-            if attempt == max_retries - 1:
-                return None, str(e)
-            time.sleep(2)
-    return None, "AI analysis failed."
+
+        except Exception as e:  # noqa: BLE001
+            err_msg = str(e)
+            is_overloaded = "503" in err_msg or "UNAVAILABLE" in err_msg or "overloaded" in err_msg.lower()
+
+            if is_overloaded and attempt < max_retries - 1:
+                last_error = "AI engine is temporarily overloaded on Google's side — retrying..."
+                time.sleep(2 ** (attempt + 1))  # 2s, 4s, 8s
+                continue
+
+            if "API_KEY_INVALID" in err_msg or "API key not valid" in err_msg:
+                return None, "Invalid AI API key. Please check your key and try again."
+            if "RESOURCE_EXHAUSTED" in err_msg or "quota" in err_msg.lower():
+                return None, "AI engine quota exhausted. Please try again later or check your billing."
+            if "PERMISSION_DENIED" in err_msg:
+                return None, "Permission denied — verify your API key has access to this engine."
+            if is_overloaded:
+                return None, (
+                    "AI engine is experiencing high demand on Google's side right now. "
+                    "This is temporary — please try again in a minute."
+                )
+            return None, f"AI engine analysis unavailable: {err_msg}"
+
+    return None, last_error or "AI analysis failed after multiple retries."
 
 
 def combine_verdict(heuristic: dict, ai_result: dict | None) -> dict:
@@ -655,6 +715,13 @@ def main():
     with st.spinner("Extracting URL & domain features..."):
         features = extract_url_features(url)
 
+    # Geo-location lookup is independent of SSL/scraping/AI — kick it off on
+    # a background thread now so its (potentially slow, multi-provider)
+    # network calls run CONCURRENTLY with the rest of the pipeline instead
+    # of adding to the total wait time sequentially at the end.
+    geo_executor = ThreadPoolExecutor(max_workers=1)
+    geo_future = geo_executor.submit(get_ip_and_location, features["domain"])
+
     with st.spinner("Verifying SSL/TLS certificate..."):
         ssl_info = check_ssl_certificate(features["domain"])
 
@@ -669,7 +736,8 @@ def main():
         ai_result, ai_error = analyze_with_ai(api_key, prompt)
 
     verdict = combine_verdict(heuristic, ai_result)
-    geo = get_ip_and_location(features["domain"])
+    geo = geo_future.result(timeout=15)
+    geo_executor.shutdown(wait=False)
 
     st.divider()
     st.subheader("📊 Final Verdict")
